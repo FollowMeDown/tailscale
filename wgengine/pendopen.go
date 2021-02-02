@@ -30,6 +30,9 @@ func debugConnectFailures() bool {
 
 type pendingOpenFlow struct {
 	timer *time.Timer // until giving up on the flow
+
+	// guaded by userspaceEngine.mu:
+	problem *packet.TailscaleRejectReason // non-nil if we got a non-terminal TSMP reject
 }
 
 func (e *userspaceEngine) removeFlow(f flowtrack.Tuple) (removed bool) {
@@ -45,6 +48,17 @@ func (e *userspaceEngine) removeFlow(f flowtrack.Tuple) (removed bool) {
 	return true
 }
 
+func (e *userspaceEngine) noteFlowProblemFromPeer(f flowtrack.Tuple, problem packet.TailscaleRejectReason) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	of, ok := e.pendOpen[f]
+	if !ok {
+		// Not a tracked flow (likely already removed)
+		return
+	}
+	of.problem = &problem
+}
+
 func (e *userspaceEngine) trackOpenPreFilterIn(pp *packet.Parsed, t *tstun.TUN) (res filter.Response) {
 	res = filter.Accept // always
 
@@ -54,8 +68,19 @@ func (e *userspaceEngine) trackOpenPreFilterIn(pp *packet.Parsed, t *tstun.TUN) 
 		if !ok {
 			return
 		}
-		if f := rh.Flow(); e.removeFlow(f) {
-			e.logf("open-conn-track: flow %v %v > %v rejected due to %v", rh.Proto, rh.Src, rh.Dst, rh.Reason)
+		switch rh.Reason {
+		case packet.RejectedDueToIPForwarding, packet.RejectedDueToHostFirewall:
+			// These reason codes are non-terminal "FYI"
+			// messages that indicate that peer has a
+			// problem and we should note it (in case we
+			// do end up firing a failure timer in N
+			// seconds), but things might still work
+			// later.
+			e.noteFlowProblemFromPeer(rh.Flow(), rh.Reason)
+		default:
+			if f := rh.Flow(); e.removeFlow(f) {
+				e.logf("open-conn-track: flow %v %v > %v rejected due to %v", rh.Proto, rh.Src, rh.Dst, rh.Reason)
+			}
 		}
 		return
 	}
@@ -106,13 +131,19 @@ func (e *userspaceEngine) trackOpenPostFilterOut(pp *packet.Parsed, t *tstun.TUN
 
 func (e *userspaceEngine) onOpenTimeout(flow flowtrack.Tuple) {
 	e.mu.Lock()
-	if _, ok := e.pendOpen[flow]; !ok {
+	of, ok := e.pendOpen[flow]
+	if !ok {
 		// Not a tracked flow, or already handled & deleted.
 		e.mu.Unlock()
 		return
 	}
 	delete(e.pendOpen, flow)
 	e.mu.Unlock()
+
+	if of.problem != nil {
+		reason := *of.problem
+		e.logf("open-conn-track: timeout opening %v; peer reported problem: %v", flow, reason)
+	}
 
 	// Diagnose why it might've timed out.
 	n, ok := e.magicConn.PeerForIP(flow.Dst.IP)

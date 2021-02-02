@@ -58,8 +58,10 @@ const (
 type TailscaleRejectReason byte
 
 const (
-	RejectedDueToACLs      TailscaleRejectReason = 'A'
-	RejectedDueToShieldsUp TailscaleRejectReason = 'S'
+	RejectedDueToACLs         TailscaleRejectReason = 'A'
+	RejectedDueToShieldsUp    TailscaleRejectReason = 'S'
+	RejectedDueToIPForwarding TailscaleRejectReason = 'F'
+	RejectedDueToHostFirewall TailscaleRejectReason = 'W'
 )
 
 func (r TailscaleRejectReason) String() string {
@@ -68,6 +70,10 @@ func (r TailscaleRejectReason) String() string {
 		return "acl"
 	case RejectedDueToShieldsUp:
 		return "shields"
+	case RejectedDueToIPForwarding:
+		return "host-ip-forwarding-unavailable"
+	case RejectedDueToHostFirewall:
+		return "host-firewall"
 	}
 	return fmt.Sprintf("0x%02x", byte(r))
 }
